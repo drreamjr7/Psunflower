@@ -1,0 +1,142 @@
+{
+  "entities": {
+    "Room": {
+      "title": "Room",
+      "description": "Watch party room state containing playback and host details",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "Unique room identifier"
+        },
+        "roomName": {
+          "type": "string",
+          "description": "Display name of the watch room"
+        },
+        "hostId": {
+          "type": "string",
+          "description": "User identifier of the room host"
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Display name of the room host"
+        },
+        "videoUrl": {
+          "type": "string",
+          "description": "Current video stream URL"
+        },
+        "videoTitle": {
+          "type": "string",
+          "description": "Current video display title"
+        },
+        "isPlaying": {
+          "type": "boolean",
+          "description": "Playback state (true = playing, false = paused)"
+        },
+        "playbackTime": {
+          "type": "number",
+          "description": "Current playback position in seconds"
+        },
+        "playbackRate": {
+          "type": "number",
+          "description": "Video playback speed"
+        },
+        "lastUpdated": {
+          "type": "number",
+          "description": "Epoch millisecond timestamp of last state change"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Epoch millisecond timestamp when room was created"
+        }
+      },
+      "required": ["roomId", "roomName", "hostId", "videoUrl", "isPlaying", "playbackTime"]
+    },
+    "Participant": {
+      "title": "Participant",
+      "description": "Member inside a watch party room",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique participant identifier"
+        },
+        "name": {
+          "type": "string",
+          "description": "Participant display name"
+        },
+        "color": {
+          "type": "string",
+          "description": "Color avatar or theme badge"
+        },
+        "isHost": {
+          "type": "boolean",
+          "description": "Whether this member is the room host"
+        },
+        "joinedAt": {
+          "type": "number",
+          "description": "Epoch timestamp of when the user joined"
+        },
+        "lastPing": {
+          "type": "number",
+          "description": "Epoch timestamp of recent heartbeat"
+        },
+        "avatarSeed": {
+          "type": "string",
+          "description": "Avatar seed for visual rendering"
+        }
+      },
+      "required": ["id", "name", "color", "isHost"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Live chat message or event within a room",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique message identifier"
+        },
+        "senderId": {
+          "type": "string",
+          "description": "Participant identifier who sent message"
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Display name of sender"
+        },
+        "senderColor": {
+          "type": "string",
+          "description": "Color of sender"
+        },
+        "text": {
+          "type": "string",
+          "description": "Text body of the chat message"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Epoch millisecond timestamp"
+        },
+        "isSystem": {
+          "type": "boolean",
+          "description": "Flag indicating automated system message"
+        }
+      },
+      "required": ["id", "senderId", "senderName", "text", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Real-time watch party rooms"
+    },
+    "/rooms/{roomId}/participants/{participantId}": {
+      "schema": "Participant",
+      "description": "Active participants in the watch room"
+    },
+    "/rooms/{roomId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Live messages and reactions in the room"
+    }
+  }
+}

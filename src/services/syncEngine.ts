@@ -1,4 +1,17 @@
 import { SyncPayload, Participant } from '../types/party';
+import {
+  updateRoomPlaybackInFirebase,
+  joinRoomParticipant,
+  updateParticipantPing,
+  leaveRoomParticipant,
+  subscribeToRoom,
+  subscribeToParticipants,
+  subscribeToMessages,
+  sendChatMessageToFirebase,
+  FirebaseRoom,
+  FirebaseParticipant,
+  FirebaseChatMessage,
+} from './firebase';
 
 export class CineSyncEngine {
   private roomId: string;
@@ -7,9 +20,11 @@ export class CineSyncEngine {
   private listeners: ((payload: SyncPayload) => void)[] = [];
   private storageHandler: ((e: StorageEvent) => void) | null = null;
   private pingInterval: number | null = null;
+  private unsubs: (() => void)[] = [];
+  private lastFirebaseUpdate = 0;
 
   constructor(roomId: string, userId: string) {
-    this.roomId = roomId;
+    this.roomId = roomId.trim().toUpperCase();
     this.userId = userId;
     this.init();
   }
@@ -25,11 +40,11 @@ export class CineSyncEngine {
           }
         };
       } catch (err) {
-        console.warn('BroadcastChannel error, falling back to storage sync', err);
+        console.warn('BroadcastChannel fallback:', err);
       }
     }
 
-    // Storage event fallback for cross-tab sync
+    // Storage event fallback for same-device tabs
     this.storageHandler = (e: StorageEvent) => {
       if (e.key === `cinesync_sync_${this.roomId}` && e.newValue) {
         try {
@@ -43,6 +58,88 @@ export class CineSyncEngine {
       }
     };
     window.addEventListener('storage', this.storageHandler);
+
+    // 1. Subscribe to Firebase Room updates
+    try {
+      const unsubRoom = subscribeToRoom(this.roomId, (room: FirebaseRoom | null) => {
+        if (!room) return;
+        if (room.lastUpdated && room.lastUpdated <= this.lastFirebaseUpdate) return;
+        if (room.lastUpdatedBy === this.userId) return;
+
+        this.lastFirebaseUpdate = room.lastUpdated || Date.now();
+
+        // Broadcast playback state to listeners
+        if (room.isPlaying) {
+          this.notifyListeners({
+            type: 'PLAY',
+            roomId: this.roomId,
+            senderId: room.hostId || 'host',
+            senderName: room.hostName || 'Host',
+            currentTime: room.playbackTime,
+            timestamp: room.lastUpdated,
+          });
+        } else {
+          this.notifyListeners({
+            type: 'PAUSE',
+            roomId: this.roomId,
+            senderId: room.hostId || 'host',
+            senderName: room.hostName || 'Host',
+            currentTime: room.playbackTime,
+            timestamp: room.lastUpdated,
+          });
+        }
+
+        // If video changed
+        if (room.videoUrl) {
+          this.notifyListeners({
+            type: 'URL_CHANGE',
+            roomId: this.roomId,
+            senderId: room.hostId || 'host',
+            senderName: room.hostName || 'Host',
+            videoUrl: room.videoUrl,
+            videoTitle: room.videoTitle,
+            timestamp: room.lastUpdated,
+          });
+        }
+      });
+      this.unsubs.push(unsubRoom);
+    } catch (err) {
+      console.error('Firebase room subscription error:', err);
+    }
+
+    // 2. Subscribe to Firebase Messages
+    try {
+      const unsubMessages = subscribeToMessages(this.roomId, (messages: FirebaseChatMessage[]) => {
+        // Find newest message
+        if (messages.length > 0) {
+          const latest = messages[messages.length - 1];
+          if (latest.senderId !== this.userId && Date.now() - latest.timestamp < 10000) {
+            if (latest.reactionEmoji) {
+              this.notifyListeners({
+                type: 'REACTION',
+                roomId: this.roomId,
+                senderId: latest.senderId,
+                senderName: latest.senderName,
+                reactionEmoji: latest.reactionEmoji,
+                timestamp: latest.timestamp,
+              });
+            } else {
+              this.notifyListeners({
+                type: 'CHAT',
+                roomId: this.roomId,
+                senderId: latest.senderId,
+                senderName: latest.senderName,
+                chatMessage: latest,
+                timestamp: latest.timestamp,
+              });
+            }
+          }
+        }
+      });
+      this.unsubs.push(unsubMessages);
+    } catch (err) {
+      console.error('Firebase messages subscription error:', err);
+    }
   }
 
   public subscribe(cb: (payload: SyncPayload) => void) {
@@ -69,35 +166,102 @@ export class CineSyncEngine {
       timestamp: Date.now(),
     };
 
-    // 1. Post to local listeners
+    // 1. Notify local listeners immediately
     this.notifyListeners(fullPayload);
 
-    // 2. Post to BroadcastChannel
+    // 2. BroadcastChannel for same-device tabs
     if (this.channel) {
       try {
         this.channel.postMessage(fullPayload);
       } catch {
-        // Channel post fallback
+        // Fallback
       }
     }
 
-    // 3. Post to localStorage for tab/window propagation
+    // 3. LocalStorage for tab sync
     try {
       localStorage.setItem(`cinesync_sync_${this.roomId}`, JSON.stringify(fullPayload));
     } catch {
-      // Storage quota or restriction fallback
+      // Ignore
+    }
+
+    // 4. Push to Firebase for cross-device synchronization
+    this.syncToFirebase(payload);
+  }
+
+  private syncToFirebase(payload: Omit<SyncPayload, 'roomId' | 'timestamp'>) {
+    this.lastFirebaseUpdate = Date.now();
+
+    if (payload.type === 'PLAY') {
+      updateRoomPlaybackInFirebase(this.roomId, {
+        isPlaying: true,
+        playbackTime: payload.currentTime !== undefined ? payload.currentTime : 0,
+        lastUpdatedBy: this.userId,
+      }).catch((err) => console.warn('Firebase play update error:', err));
+    } else if (payload.type === 'PAUSE') {
+      updateRoomPlaybackInFirebase(this.roomId, {
+        isPlaying: false,
+        playbackTime: payload.currentTime !== undefined ? payload.currentTime : 0,
+        lastUpdatedBy: this.userId,
+      }).catch((err) => console.warn('Firebase pause update error:', err));
+    } else if (payload.type === 'SEEK') {
+      updateRoomPlaybackInFirebase(this.roomId, {
+        playbackTime: payload.currentTime !== undefined ? payload.currentTime : 0,
+        lastUpdatedBy: this.userId,
+      }).catch((err) => console.warn('Firebase seek update error:', err));
+    } else if (payload.type === 'SPEED') {
+      updateRoomPlaybackInFirebase(this.roomId, {
+        playbackRate: payload.playbackRate || 1,
+        lastUpdatedBy: this.userId,
+      }).catch((err) => console.warn('Firebase speed update error:', err));
+    } else if (payload.type === 'URL_CHANGE') {
+      updateRoomPlaybackInFirebase(this.roomId, {
+        videoUrl: payload.videoUrl,
+        videoTitle: payload.videoTitle,
+        playbackTime: 0,
+        isPlaying: false,
+        lastUpdatedBy: this.userId,
+      }).catch((err) => console.warn('Firebase URL change error:', err));
+    } else if (payload.type === 'CHAT' && payload.chatMessage) {
+      sendChatMessageToFirebase(this.roomId, payload.chatMessage).catch((err) =>
+        console.warn('Firebase chat error:', err)
+      );
+    } else if (payload.type === 'REACTION' && payload.reactionEmoji) {
+      sendChatMessageToFirebase(this.roomId, {
+        id: `react-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        senderId: payload.senderId,
+        senderName: payload.senderName,
+        senderColor: '#f59e0b',
+        text: `Sent reaction ${payload.reactionEmoji}`,
+        timestamp: Date.now(),
+        reactionEmoji: payload.reactionEmoji,
+      }).catch((err) => console.warn('Firebase reaction error:', err));
     }
   }
 
   public startHeartbeat(participant: Participant) {
     if (this.pingInterval) clearInterval(this.pingInterval);
+
+    // Initial register in Firebase
+    joinRoomParticipant(this.roomId, {
+      id: participant.id,
+      name: participant.name,
+      color: participant.color,
+      isHost: !!participant.isHost,
+      joinedAt: participant.joinedAt || Date.now(),
+      lastPing: Date.now(),
+      avatarSeed: participant.avatarSeed || participant.name,
+    }).catch((err) => console.warn('Join participant error:', err));
+
+    // Send heartbeats every 8 seconds
     this.pingInterval = window.setInterval(() => {
+      updateParticipantPing(this.roomId, participant.id).catch(() => {});
       this.broadcast({
         type: 'PING',
         senderId: participant.id,
         senderName: participant.name,
       });
-    }, 4000);
+    }, 8000);
   }
 
   public destroy() {
@@ -105,6 +269,18 @@ export class CineSyncEngine {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
+
+    leaveRoomParticipant(this.roomId, this.userId).catch(() => {});
+
+    this.unsubs.forEach((unsub) => {
+      try {
+        unsub();
+      } catch {
+        // Ignore
+      }
+    });
+    this.unsubs = [];
+
     if (this.channel) {
       try {
         this.channel.close();
@@ -150,7 +326,7 @@ export function normalizeVideoUrl(inputUrl: string): string {
 
 export function generateRoomCode(): string {
   const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let res = 'CINE-';
+  let res = 'SUN-';
   for (let i = 0; i < 5; i++) {
     res += letters.charAt(Math.floor(Math.random() * letters.length));
   }
@@ -158,10 +334,10 @@ export function generateRoomCode(): string {
 }
 
 export const USER_COLORS = [
+  '#f59e0b', // Amber / Sunflower Gold
   '#00e5ff', // Cyan
   '#ff2d72', // Magenta/Pink
   '#10b981', // Emerald
-  '#f59e0b', // Amber
   '#8b5cf6', // Violet
   '#ec4899', // Pink
   '#06b6d4', // Sky

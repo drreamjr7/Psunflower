@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { Participant, ChatMessage, ReactionBurst, SyncPayload } from '../types/party';
 import { CineSyncEngine, normalizeVideoUrl } from '../services/syncEngine';
+import { getRoomFromFirebase, subscribeToParticipants, subscribeToMessages } from '../services/firebase';
 import { playSound } from '../services/soundEffects';
 import { FloatingReactions } from './FloatingReactions';
 import { VIDEO_PRESETS } from '../data/videoPresets';
@@ -137,6 +138,75 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
       engine.destroy();
     };
   }, [roomId, currentParticipant.id]);
+
+  // Sync initial state and real-time roster/chat from Firebase
+  useEffect(() => {
+    let active = true;
+
+    // Fetch room state from Firebase
+    getRoomFromFirebase(roomId).then((room) => {
+      if (!active || !room) return;
+      if (room.videoUrl && room.videoUrl !== videoUrl) {
+        setVideoUrl(room.videoUrl);
+        if (room.videoTitle) setVideoTitle(room.videoTitle);
+      }
+      if (videoRef.current && room.playbackTime !== undefined) {
+        if (Math.abs(videoRef.current.currentTime - room.playbackTime) > 1.2) {
+          videoRef.current.currentTime = room.playbackTime;
+          setCurrentTime(room.playbackTime);
+        }
+        if (room.isPlaying) {
+          videoRef.current.play().catch(() => {});
+          setIsPlaying(true);
+        } else {
+          videoRef.current.pause();
+          setIsPlaying(false);
+        }
+      }
+    });
+
+    // Realtime roster from Firebase
+    const unsubParticipants = subscribeToParticipants(roomId, (list) => {
+      if (!active) return;
+      if (list && list.length > 0) {
+        setParticipants(
+          list.map((p) => ({
+            id: p.id,
+            name: p.name,
+            color: p.color,
+            isHost: p.isHost,
+            avatarSeed: p.avatarSeed || p.name,
+            joinedAt: p.joinedAt,
+            lastPing: p.lastPing,
+          }))
+        );
+      }
+    });
+
+    // Realtime chat from Firebase
+    const unsubMessages = subscribeToMessages(roomId, (msgs) => {
+      if (!active) return;
+      if (msgs && msgs.length > 0) {
+        setMessages(
+          msgs.map((m) => ({
+            id: m.id,
+            senderId: m.senderId,
+            senderName: m.senderName,
+            senderColor: m.senderColor,
+            text: m.text,
+            timestamp: m.timestamp,
+            isSystem: m.isSystem,
+          }))
+        );
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubParticipants();
+      unsubMessages();
+    };
+  }, [roomId]);
 
   // Handle incoming payloads
   const handleIncomingSync = useCallback((payload: SyncPayload) => {
@@ -493,9 +563,15 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
     }
   };
 
-  const copyRoomLink = () => {
-    const link = `${window.location.origin}${window.location.pathname}#room=${roomId}`;
-    navigator.clipboard?.writeText(link);
+  const copyRoomLink = async () => {
+    const link = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(link);
+      }
+    } catch {
+      // Ignore
+    }
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2000);
   };
@@ -529,8 +605,8 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Owner Dev Console Button */}
-          {onOpenOwnerPanel && (
+          {/* Owner Dev Console Button - Only for Room Owner */}
+          {currentParticipant.isHost && onOpenOwnerPanel && (
             <button
               onClick={onOpenOwnerPanel}
               title="Sunflower Owner & Dev Console"

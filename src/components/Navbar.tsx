@@ -3,6 +3,7 @@ import { Github, LogIn, Plus, Download, ShieldCheck } from 'lucide-react';
 
 interface NavbarProps {
   currentRoomId: string | null;
+  isOwner?: boolean;
   onOpenCreate: () => void;
   onOpenJoin: () => void;
   onOpenGitHubHub: () => void;
@@ -13,6 +14,7 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({
   currentRoomId,
+  isOwner = true,
   onOpenCreate,
   onOpenJoin,
   onOpenGitHubHub,
@@ -74,15 +76,17 @@ export const Navbar: React.FC<NavbarProps> = ({
 
       {/* Zone 3: 1-2 primary actions */}
       <div className="flex items-center gap-2">
-        {/* Owner Panel Button */}
-        <button
-          onClick={onOpenOwnerPanel}
-          title="Open Sunflower Owner & Dev Console"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/35 hover:border-amber-400 rounded-lg transition-all cursor-pointer shadow-sm shadow-amber-500/10"
-        >
-          <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-          <span className="hidden sm:inline">Owner Panel</span>
-        </button>
+        {/* Owner Panel Button - only for Owner */}
+        {isOwner && (
+          <button
+            onClick={onOpenOwnerPanel}
+            title="Open Sunflower Owner & Dev Console"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/35 hover:border-amber-400 rounded-lg transition-all cursor-pointer shadow-sm shadow-amber-500/10"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden sm:inline">Owner Panel</span>
+          </button>
+        )}
 
         {currentRoomId ? (
           <div className="flex items-center gap-2 sm:gap-3">

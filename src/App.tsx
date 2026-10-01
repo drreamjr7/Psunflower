@@ -6,11 +6,17 @@ import { CreateRoomModal } from './components/CreateRoomModal';
 import { JoinRoomModal } from './components/JoinRoomModal';
 import { GitHubHostingModal } from './components/GitHubHostingModal';
 import { OwnerPanelModal } from './components/OwnerPanelModal';
-import { Participant, VideoPreset, SyncPayload } from './types/party';
+import { Participant, VideoPreset } from './types/party';
 import { VIDEO_PRESETS } from './data/videoPresets';
 import { generateRoomCode, getRandomColor, CineSyncEngine } from './services/syncEngine';
-import { trackVisitorJoin, logOwnerEvent, formatHHMM } from './services/analyticsTracker';
-import { Film, Github, Sparkles, Heart, ShieldCheck } from 'lucide-react';
+import { trackVisitorJoin } from './services/analyticsTracker';
+import {
+  getRoomFromFirebase,
+  createRoomInFirebase,
+  joinRoomParticipant,
+  FirebaseRoom,
+} from './services/firebase';
+import { Github, ShieldCheck, AlertTriangle, ArrowRight, Home, Plus } from 'lucide-react';
 
 export default function App() {
   // Navigation / Room State
@@ -24,43 +30,85 @@ export default function App() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isJoinOpen, setIsJoinOpen] = useState(false);
   const [joinModalInitialCode, setJoinModalInitialCode] = useState('');
+  const [isJoinInvite, setIsJoinInvite] = useState(false);
   const [isGitHubHubOpen, setIsGitHubHubOpen] = useState(false);
   const [isOwnerPanelOpen, setIsOwnerPanelOpen] = useState(false);
   const [ownerAnnouncement, setOwnerAnnouncement] = useState<string | null>(null);
 
-  // Keyboard shortcut for Owner Panel (Ctrl+Shift+D or Alt+O)
+  // Room not found state
+  const [roomNotFoundCode, setRoomNotFoundCode] = useState<string | null>(null);
+
+  // Owner calculation: only true if on lounge or if host of the current room
+  const isOwner = !currentRoomId || !!currentParticipant?.isHost;
+
+  // Keyboard shortcut for Owner Panel (Ctrl+Shift+D or Alt+O) - only for owner
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) || (e.altKey && (e.key === 'o' || e.key === 'O'))) {
+      if (
+        (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) ||
+        (e.altKey && (e.key === 'o' || e.key === 'O'))
+      ) {
+        if (!isOwner) return;
         e.preventDefault();
         setIsOwnerPanelOpen((prev) => !prev);
       }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, []);
+  }, [isOwner]);
 
-  // Listen for hash changes (e.g. #room=CINE-12345)
+  // Read ?room=ROOM_ID from URL on page load or URL change
   useEffect(() => {
-    const handleHash = () => {
-      const hash = window.location.hash;
-      const match = hash.match(/room=([^&]+)/);
-      if (match && match[1]) {
-        const code = match[1].toUpperCase();
-        if (!currentRoomId) {
-          setJoinModalInitialCode(code);
-          setIsJoinOpen(true);
+    const handleUrlRoom = async () => {
+      const params = new URLSearchParams(window.location.search);
+      const urlRoom = params.get('room') || window.location.hash.match(/room=([^&]+)/)?.[1];
+
+      if (urlRoom) {
+        const code = urlRoom.trim().toUpperCase();
+        if (currentRoomId === code) return;
+
+        try {
+          const room = await getRoomFromFirebase(code);
+          if (room) {
+            // Check if user already has a saved session for this room
+            const savedSession = sessionStorage.getItem(`sunflower_user_${code}`);
+            if (savedSession) {
+              try {
+                const parsed = JSON.parse(savedSession) as Participant;
+                setCurrentParticipant(parsed);
+                setCurrentRoomId(room.roomId);
+                setCurrentRoomName(room.roomName);
+                setCurrentVideoUrl(room.videoUrl);
+                setCurrentVideoTitle(room.videoTitle);
+                return;
+              } catch {
+                // Ignore parse errors and prompt join
+              }
+            }
+
+            setJoinModalInitialCode(code);
+            setIsJoinInvite(true);
+            setIsJoinOpen(true);
+          } else {
+            // Room does not exist in Firebase. NEVER silently create another room!
+            setRoomNotFoundCode(code);
+          }
+        } catch (err) {
+          console.error('Error verifying room in Firebase:', err);
+          setRoomNotFoundCode(code);
         }
       }
     };
 
-    handleHash();
-    window.addEventListener('hashchange', handleHash);
-    return () => window.removeEventListener('hashchange', handleHash);
+    handleUrlRoom();
+
+    const handlePopState = () => handleUrlRoom();
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, [currentRoomId]);
 
   // Handle Room Creation
-  const handleCreateRoom = ({
+  const handleCreateRoom = async ({
     roomCode,
     roomName,
     hostName,
@@ -73,52 +121,109 @@ export default function App() {
     videoUrl: string;
     videoTitle: string;
   }) => {
+    const cleanCode = (roomCode || generateRoomCode()).trim().toUpperCase();
+    const cleanRoomName = roomName.trim() || 'Sunflower Watch Party';
+
     const participant: Participant = {
-      id: `user-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      name: hostName,
+      id: `host-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      name: hostName.trim() || 'Alex',
       color: '#f59e0b',
       isHost: true,
-      avatarSeed: hostName,
+      avatarSeed: hostName.trim() || 'Alex',
       joinedAt: Date.now(),
       lastPing: Date.now(),
     };
 
-    // Track visitor join in owner analytics
-    trackVisitorJoin(participant.id, hostName, 'owner', roomCode, roomName, participant.color);
+    // 1. Create Room in Firebase Realtime Store
+    await createRoomInFirebase({
+      roomId: cleanCode,
+      roomName: cleanRoomName,
+      hostId: participant.id,
+      hostName: participant.name,
+      videoUrl,
+      videoTitle,
+      isPlaying: false,
+      playbackTime: 0,
+      playbackRate: 1,
+      lastUpdated: Date.now(),
+      createdAt: Date.now(),
+    });
+
+    // 2. Register Host presence
+    await joinRoomParticipant(cleanCode, {
+      id: participant.id,
+      name: participant.name,
+      color: participant.color,
+      isHost: true,
+      joinedAt: participant.joinedAt,
+      lastPing: Date.now(),
+      avatarSeed: participant.avatarSeed,
+    });
+
+    // 3. Save session for seamless refresh
+    sessionStorage.setItem(`sunflower_user_${cleanCode}`, JSON.stringify(participant));
+    trackVisitorJoin(participant.id, hostName, 'owner', cleanCode, cleanRoomName, participant.color);
 
     setCurrentParticipant(participant);
-    setCurrentRoomId(roomCode);
-    setCurrentRoomName(roomName);
+    setCurrentRoomId(cleanCode);
+    setCurrentRoomName(cleanRoomName);
     setCurrentVideoUrl(videoUrl);
     setCurrentVideoTitle(videoTitle);
     setIsCreateOpen(false);
 
-    window.location.hash = `room=${roomCode}`;
+    // 4. Update address bar to ?room=ROOM_ID
+    const newUrl = `${window.location.pathname}?room=${cleanCode}`;
+    window.history.pushState({ room: cleanCode }, '', newUrl);
   };
 
   // Handle Join Room
-  const handleJoinRoom = (roomCode: string, userName: string) => {
+  const handleJoinRoom = async (roomCode: string, userName: string) => {
+    const cleanCode = roomCode.trim().toUpperCase();
+
+    // Look up exact room in Firebase
+    const room = await getRoomFromFirebase(cleanCode);
+    if (!room) {
+      setIsJoinOpen(false);
+      setRoomNotFoundCode(cleanCode);
+      return;
+    }
+
     const participant: Participant = {
-      id: `user-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      name: userName,
+      id: `guest-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      name: userName.trim() || 'Guest',
       color: getRandomColor(),
-      isHost: false,
-      avatarSeed: userName,
+      isHost: false, // Explicitly not host
+      avatarSeed: userName.trim() || 'Guest',
       joinedAt: Date.now(),
       lastPing: Date.now(),
     };
 
-    // Track visitor join in owner analytics
-    trackVisitorJoin(participant.id, userName, 'guest', roomCode, `Room ${roomCode}`, participant.color);
+    // Register Guest presence in Firebase
+    await joinRoomParticipant(cleanCode, {
+      id: participant.id,
+      name: participant.name,
+      color: participant.color,
+      isHost: false,
+      joinedAt: participant.joinedAt,
+      lastPing: Date.now(),
+      avatarSeed: participant.avatarSeed,
+    });
+
+    // Save session for seamless refresh
+    sessionStorage.setItem(`sunflower_user_${cleanCode}`, JSON.stringify(participant));
+    trackVisitorJoin(participant.id, userName, 'guest', cleanCode, room.roomName, participant.color);
 
     setCurrentParticipant(participant);
-    setCurrentRoomId(roomCode);
-    setCurrentRoomName(`Sunflower Room ${roomCode}`);
-    setCurrentVideoUrl(VIDEO_PRESETS[0].url);
-    setCurrentVideoTitle(VIDEO_PRESETS[0].title);
+    setCurrentRoomId(cleanCode);
+    setCurrentRoomName(room.roomName);
+    setCurrentVideoUrl(room.videoUrl);
+    setCurrentVideoTitle(room.videoTitle);
     setIsJoinOpen(false);
+    setIsJoinInvite(false);
 
-    window.location.hash = `room=${roomCode}`;
+    // Update address bar to ?room=ROOM_ID
+    const newUrl = `${window.location.pathname}?room=${cleanCode}`;
+    window.history.pushState({ room: cleanCode }, '', newUrl);
   };
 
   // Quick launch preset directly from Hero
@@ -134,9 +239,12 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
+    if (currentRoomId) {
+      sessionStorage.removeItem(`sunflower_user_${currentRoomId}`);
+    }
     setCurrentRoomId(null);
     setCurrentParticipant(null);
-    window.location.hash = '';
+    window.history.pushState({}, '', window.location.pathname);
   };
 
   const scrollToSection = (sectionId: string) => {
@@ -186,10 +294,8 @@ export default function App() {
     const botColor = '#10b981';
     const roomCode = currentRoomId || 'TEST-ROOM';
 
-    // 1. Track in analytics
     trackVisitorJoin(botId, botName, 'bot', roomCode, 'Sunflower Lounge', botColor);
 
-    // 2. Broadcast join event and chat
     if (currentRoomId) {
       const engine = new CineSyncEngine(currentRoomId, botId);
       engine.broadcast({
@@ -240,9 +346,11 @@ export default function App() {
       {/* Top Navbar */}
       <Navbar
         currentRoomId={currentRoomId}
+        isOwner={isOwner}
         onOpenCreate={() => setIsCreateOpen(true)}
         onOpenJoin={() => {
           setJoinModalInitialCode('');
+          setIsJoinInvite(false);
           setIsJoinOpen(true);
         }}
         onOpenGitHubHub={() => setIsGitHubHubOpen(true)}
@@ -262,7 +370,7 @@ export default function App() {
             initialVideoTitle={currentVideoTitle}
             onLeaveRoom={handleLeaveRoom}
             onOpenGitHubHub={() => setIsGitHubHubOpen(true)}
-            onOpenOwnerPanel={() => setIsOwnerPanelOpen(true)}
+            onOpenOwnerPanel={isOwner ? () => setIsOwnerPanelOpen(true) : undefined}
             ownerAnnouncement={ownerAnnouncement}
           />
         ) : (
@@ -270,6 +378,7 @@ export default function App() {
             onOpenCreate={() => setIsCreateOpen(true)}
             onOpenJoin={() => {
               setJoinModalInitialCode('');
+              setIsJoinInvite(false);
               setIsJoinOpen(true);
             }}
             onOpenGitHubHub={() => setIsGitHubHubOpen(true)}
@@ -287,18 +396,21 @@ export default function App() {
               <span className="sunflower-animated-title font-extrabold text-sm">Sunflower</span>
               <span className="text-slate-600">&bull;</span>
               <span className="text-slate-400 font-sans text-xs font-normal">
-                Synchronized Movie Lounge &amp; GitHub Pages Toolkit
+                Synchronized Movie Lounge &amp; GitHub Pages Hosting
               </span>
             </div>
 
             <div className="flex items-center gap-5 text-slate-400">
-              <button
-                onClick={() => setIsOwnerPanelOpen(true)}
-                className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer font-semibold text-amber-300/90"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                <span>Owner &amp; Dev Console</span>
-              </button>
+              {/* Only show owner console in footer if owner */}
+              {isOwner && (
+                <button
+                  onClick={() => setIsOwnerPanelOpen(true)}
+                  className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer font-semibold text-amber-300/90"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Owner &amp; Dev Console</span>
+                </button>
+              )}
               <button
                 onClick={() => setIsGitHubHubOpen(true)}
                 className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer"
@@ -315,6 +427,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setJoinModalInitialCode('');
+                  setIsJoinInvite(false);
                   setIsJoinOpen(true);
                 }}
                 className="hover:text-white transition-colors cursor-pointer"
@@ -336,9 +449,61 @@ export default function App() {
       <JoinRoomModal
         isOpen={isJoinOpen}
         initialRoomCode={joinModalInitialCode}
-        onClose={() => setIsJoinOpen(false)}
+        isInviteLink={isJoinInvite}
+        onClose={() => {
+          setIsJoinOpen(false);
+          setIsJoinInvite(false);
+        }}
         onJoinRoom={handleJoinRoom}
       />
+
+      {/* Room Not Found or Expired Modal */}
+      {roomNotFoundCode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 md:p-6 bg-black/80 backdrop-blur-md">
+          <div className="bg-[#0b0f17] border border-rose-500/30 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden shadow-rose-500/10">
+            <div className="px-6 py-5 border-b border-white/8 bg-rose-950/20 flex items-center gap-3">
+              <span className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </span>
+              <div>
+                <h3 className="font-display font-bold text-base text-white">Room Not Found or Expired</h3>
+                <p className="text-xs text-rose-300/80 font-mono">Code: {roomNotFoundCode}</p>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-slate-300 leading-relaxed">
+                The watch party room <span className="font-mono text-amber-300 font-semibold">{roomNotFoundCode}</span>{' '}
+                does not exist or has already ended. Please double-check your invite link or spin up a new room.
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-2 pt-2">
+                <button
+                  onClick={() => {
+                    setRoomNotFoundCode(null);
+                    window.history.pushState({}, '', window.location.pathname);
+                  }}
+                  className="flex-1 py-2.5 px-4 bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span>Return to Lounge</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setRoomNotFoundCode(null);
+                    window.history.pushState({}, '', window.location.pathname);
+                    setIsCreateOpen(true);
+                  }}
+                  className="flex-1 py-2.5 px-4 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Create Watch Room</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <GitHubHostingModal
         isOpen={isGitHubHubOpen}
@@ -359,14 +524,16 @@ export default function App() {
         }}
       />
 
-      <OwnerPanelModal
-        isOpen={isOwnerPanelOpen}
-        onClose={() => setIsOwnerPanelOpen(false)}
-        currentRoomId={currentRoomId}
-        onBroadcastAnnouncement={handleBroadcastAnnouncement}
-        onForcePlayback={handleForcePlayback}
-        onSpawnTestBot={handleSpawnTestBot}
-      />
+      {isOwner && (
+        <OwnerPanelModal
+          isOpen={isOwnerPanelOpen}
+          onClose={() => setIsOwnerPanelOpen(false)}
+          currentRoomId={currentRoomId}
+          onBroadcastAnnouncement={handleBroadcastAnnouncement}
+          onForcePlayback={handleForcePlayback}
+          onSpawnTestBot={handleSpawnTestBot}
+        />
+      )}
     </div>
   );
 }

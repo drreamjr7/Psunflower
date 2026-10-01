@@ -71,10 +71,16 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
     });
   };
 
-  const inviteLink = `${window.location.origin}${window.location.pathname}#room=${roomCode}`;
+  const inviteLink = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
 
-  const handleCopyLink = () => {
-    navigator.clipboard?.writeText(inviteLink);
+  const handleCopyLink = async () => {
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(inviteLink);
+      }
+    } catch {
+      // Ignore
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
