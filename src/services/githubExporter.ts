@@ -2,11 +2,13 @@ import JSZip from 'jszip';
 import { GitHubHostingConfig } from '../types/party';
 
 export function generateGitHubWorkflow(config: GitHubHostingConfig): string {
-  return `name: Deploy CineSync to GitHub Pages
+  return `name: Deploy Sunflower to GitHub Pages
 
 on:
   push:
-    branches: [ ${config.branch || 'main'} ]
+    branches:
+      - ${config.branch || 'main'}
+      - master
   workflow_dispatch:
 
 permissions:
@@ -25,7 +27,7 @@ jobs:
       url: \${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -35,15 +37,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci || npm install
+        run: npm install
 
-      - name: Build Application
+      - name: Build project
         run: npm run build
-        env:
-          VITE_BASE_PATH: '/${config.repoName || 'cinesync'}/'
 
       - name: Setup Pages
-        uses: actions/configure-pages@v4
+        uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -57,8 +57,8 @@ jobs:
 }
 
 export function generateReadme(config: GitHubHostingConfig): string {
-  const repo = config.repoName || 'cinesync-party';
-  const user = config.username || 'username';
+  const repo = config.repoName || 'Psunflower';
+  const user = config.username || 'drreamjr7';
   const url = `https://${user}.github.io/${repo}/`;
 
   return `# CineSync — Synchronized Watch Party

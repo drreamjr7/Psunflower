@@ -37,8 +37,8 @@ export const GitHubHostingModal: React.FC<GitHubHostingModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'quick-zip' | 'workflow' | 'streamer' | 'docs'>('quick-zip');
   const [config, setConfig] = useState<GitHubHostingConfig>({
-    repoName: 'cinesync-party',
-    username: 'octocat',
+    repoName: 'Psunflower',
+    username: 'drreamjr7',
     branch: 'main',
     customDomain: '',
     enableWorkflow: true,
