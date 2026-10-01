@@ -1,0 +1,67 @@
+import { VideoPreset } from '../types/party';
+import posterSynth from '../assets/images/movie_poster_synth_1790750925236.jpg';
+import posterNature from '../assets/images/movie_poster_nature_1790750943301.jpg';
+import heroCinema from '../assets/images/hero_cinema_ambient_1790750903149.jpg';
+
+export const VIDEO_PRESETS: VideoPreset[] = [
+  {
+    id: 'big-buck-bunny',
+    title: 'Big Buck Bunny',
+    creator: 'Blender Foundation',
+    duration: '09:56',
+    resolution: '1080p 60fps',
+    genre: '3D Animation · Comedy',
+    description: 'The iconic open-source animated short film following a giant lovable rabbit confronting forest pranksters.',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+    thumbnail: heroCinema,
+    sourceType: 'sample',
+  },
+  {
+    id: 'tears-of-steel',
+    title: 'Tears of Steel',
+    creator: 'Blender VFX Project',
+    duration: '12:14',
+    resolution: '4K Ultra HD',
+    genre: 'Sci-Fi · Cyberpunk VFX',
+    description: 'A dystopian Amsterdam where a team of desperate roboticists attempt to stage a memory sequence to save humanity.',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
+    thumbnail: posterSynth,
+    sourceType: 'sample',
+  },
+  {
+    id: 'sintel-open',
+    title: 'Sintel: The Dragon Hunter',
+    creator: 'Ton Roosendaal & Blender',
+    duration: '14:48',
+    resolution: '1080p Cinema',
+    genre: 'Fantasy · Adventure',
+    description: 'A lonely girl nurses a wounded baby dragon, forming an unbreakable bond across a treacherous frozen land.',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
+    thumbnail: posterNature,
+    sourceType: 'sample',
+  },
+  {
+    id: 'github-raw-sample',
+    title: 'Elephants Dream (GitHub Streamed)',
+    creator: 'GitHub Hosted Open Movie',
+    duration: '10:54',
+    resolution: '1080p HD',
+    genre: 'Surrealist · Open Source',
+    description: 'Demonstrating direct streaming hosted on a public GitHub repository using raw.githubusercontent.com.',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+    thumbnail: posterSynth,
+    sourceType: 'github',
+  },
+  {
+    id: 'for-bigger-blazes',
+    title: 'Cosmic Journey & Chromatic Horizons',
+    creator: 'Google Media Sample Showcase',
+    duration: '00:15',
+    resolution: '4K Cinema HDR',
+    genre: 'Cinematic · Demo Reel',
+    description: 'Vibrant chromatic video test ideal for testing instant synchronization latency and Ambilight backlighting.',
+    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+    thumbnail: heroCinema,
+    sourceType: 'sample',
+  },
+];

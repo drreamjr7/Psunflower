@@ -1,0 +1,6 @@
+{
+  "name": "CineSync — Watch Party & GitHub Hosting Hub",
+  "description": "Modern synchronized movie night and watch party app with real-time video sync, live chat, ambient theater mode, and GitHub Pages hosting toolkit.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
