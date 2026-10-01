@@ -5,11 +5,9 @@ import {
   updateParticipantPing,
   leaveRoomParticipant,
   subscribeToRoom,
-  subscribeToParticipants,
   subscribeToMessages,
   sendChatMessageToFirebase,
   FirebaseRoom,
-  FirebaseParticipant,
   FirebaseChatMessage,
 } from './firebase';
 
@@ -21,10 +19,9 @@ export class CineSyncEngine {
   private storageHandler: ((e: StorageEvent) => void) | null = null;
   private pingInterval: number | null = null;
   private unsubs: (() => void)[] = [];
-  private lastFirebaseUpdate = 0;
 
   constructor(roomId: string, userId: string) {
-    this.roomId = roomId.trim().toUpperCase();
+    this.roomId = roomId.trim().replace(/[^a-zA-Z0-9-_]/g, '').toUpperCase();
     this.userId = userId;
     this.init();
   }
@@ -63,17 +60,22 @@ export class CineSyncEngine {
     try {
       const unsubRoom = subscribeToRoom(this.roomId, (room: FirebaseRoom | null) => {
         if (!room) return;
-        if (room.lastUpdated && room.lastUpdated <= this.lastFirebaseUpdate) return;
+        // Ignore updates originated by THIS user to avoid playback loops
         if (room.lastUpdatedBy === this.userId) return;
 
-        this.lastFirebaseUpdate = room.lastUpdated || Date.now();
+        console.log('[Sunflower Room Sync] Received remote room update from Firestore:', {
+          roomId: room.roomId,
+          isPlaying: room.isPlaying,
+          playbackTime: room.playbackTime,
+          lastUpdatedBy: room.lastUpdatedBy,
+        });
 
         // Broadcast playback state to listeners
         if (room.isPlaying) {
           this.notifyListeners({
             type: 'PLAY',
             roomId: this.roomId,
-            senderId: room.hostId || 'host',
+            senderId: room.lastUpdatedBy || room.hostId || 'host',
             senderName: room.hostName || 'Host',
             currentTime: room.playbackTime,
             timestamp: room.lastUpdated,
@@ -82,7 +84,7 @@ export class CineSyncEngine {
           this.notifyListeners({
             type: 'PAUSE',
             roomId: this.roomId,
-            senderId: room.hostId || 'host',
+            senderId: room.lastUpdatedBy || room.hostId || 'host',
             senderName: room.hostName || 'Host',
             currentTime: room.playbackTime,
             timestamp: room.lastUpdated,
@@ -94,7 +96,7 @@ export class CineSyncEngine {
           this.notifyListeners({
             type: 'URL_CHANGE',
             roomId: this.roomId,
-            senderId: room.hostId || 'host',
+            senderId: room.lastUpdatedBy || room.hostId || 'host',
             senderName: room.hostName || 'Host',
             videoUrl: room.videoUrl,
             videoTitle: room.videoTitle,
@@ -104,16 +106,15 @@ export class CineSyncEngine {
       });
       this.unsubs.push(unsubRoom);
     } catch (err) {
-      console.error('Firebase room subscription error:', err);
+      console.error('[Sunflower Room Sync] Firebase room subscription error:', err);
     }
 
     // 2. Subscribe to Firebase Messages
     try {
       const unsubMessages = subscribeToMessages(this.roomId, (messages: FirebaseChatMessage[]) => {
-        // Find newest message
         if (messages.length > 0) {
           const latest = messages[messages.length - 1];
-          if (latest.senderId !== this.userId && Date.now() - latest.timestamp < 10000) {
+          if (latest.senderId !== this.userId && Date.now() - latest.timestamp < 15000) {
             if (latest.reactionEmoji) {
               this.notifyListeners({
                 type: 'REACTION',
@@ -138,7 +139,7 @@ export class CineSyncEngine {
       });
       this.unsubs.push(unsubMessages);
     } catch (err) {
-      console.error('Firebase messages subscription error:', err);
+      console.error('[Sunflower Room Sync] Firebase messages subscription error:', err);
     }
   }
 
@@ -154,7 +155,7 @@ export class CineSyncEngine {
       try {
         listener(payload);
       } catch (err) {
-        console.error('Error in CineSync listener', err);
+        console.error('[Sunflower Room Sync] Error in CineSync listener', err);
       }
     });
   }
@@ -185,35 +186,35 @@ export class CineSyncEngine {
       // Ignore
     }
 
-    // 4. Push to Firebase for cross-device synchronization
+    // 4. Push to Firebase Firestore for cross-device synchronization
     this.syncToFirebase(payload);
   }
 
   private syncToFirebase(payload: Omit<SyncPayload, 'roomId' | 'timestamp'>) {
-    this.lastFirebaseUpdate = Date.now();
+    console.log('[Sunflower Room Sync] Broadcasting payload to Firestore:', payload.type);
 
     if (payload.type === 'PLAY') {
       updateRoomPlaybackInFirebase(this.roomId, {
         isPlaying: true,
         playbackTime: payload.currentTime !== undefined ? payload.currentTime : 0,
         lastUpdatedBy: this.userId,
-      }).catch((err) => console.warn('Firebase play update error:', err));
+      }).catch((err) => console.warn('[Sunflower Room Sync] Firebase play update error:', err));
     } else if (payload.type === 'PAUSE') {
       updateRoomPlaybackInFirebase(this.roomId, {
         isPlaying: false,
         playbackTime: payload.currentTime !== undefined ? payload.currentTime : 0,
         lastUpdatedBy: this.userId,
-      }).catch((err) => console.warn('Firebase pause update error:', err));
+      }).catch((err) => console.warn('[Sunflower Room Sync] Firebase pause update error:', err));
     } else if (payload.type === 'SEEK') {
       updateRoomPlaybackInFirebase(this.roomId, {
         playbackTime: payload.currentTime !== undefined ? payload.currentTime : 0,
         lastUpdatedBy: this.userId,
-      }).catch((err) => console.warn('Firebase seek update error:', err));
+      }).catch((err) => console.warn('[Sunflower Room Sync] Firebase seek update error:', err));
     } else if (payload.type === 'SPEED') {
       updateRoomPlaybackInFirebase(this.roomId, {
         playbackRate: payload.playbackRate || 1,
         lastUpdatedBy: this.userId,
-      }).catch((err) => console.warn('Firebase speed update error:', err));
+      }).catch((err) => console.warn('[Sunflower Room Sync] Firebase speed update error:', err));
     } else if (payload.type === 'URL_CHANGE') {
       updateRoomPlaybackInFirebase(this.roomId, {
         videoUrl: payload.videoUrl,
@@ -221,10 +222,10 @@ export class CineSyncEngine {
         playbackTime: 0,
         isPlaying: false,
         lastUpdatedBy: this.userId,
-      }).catch((err) => console.warn('Firebase URL change error:', err));
+      }).catch((err) => console.warn('[Sunflower Room Sync] Firebase URL change error:', err));
     } else if (payload.type === 'CHAT' && payload.chatMessage) {
       sendChatMessageToFirebase(this.roomId, payload.chatMessage).catch((err) =>
-        console.warn('Firebase chat error:', err)
+        console.warn('[Sunflower Room Sync] Firebase chat error:', err)
       );
     } else if (payload.type === 'REACTION' && payload.reactionEmoji) {
       sendChatMessageToFirebase(this.roomId, {
@@ -235,7 +236,7 @@ export class CineSyncEngine {
         text: `Sent reaction ${payload.reactionEmoji}`,
         timestamp: Date.now(),
         reactionEmoji: payload.reactionEmoji,
-      }).catch((err) => console.warn('Firebase reaction error:', err));
+      }).catch((err) => console.warn('[Sunflower Room Sync] Firebase reaction error:', err));
     }
   }
 
@@ -251,7 +252,7 @@ export class CineSyncEngine {
       joinedAt: participant.joinedAt || Date.now(),
       lastPing: Date.now(),
       avatarSeed: participant.avatarSeed || participant.name,
-    }).catch((err) => console.warn('Join participant error:', err));
+    }).catch((err) => console.warn('[Sunflower Room Sync] Join participant error:', err));
 
     // Send heartbeats every 8 seconds
     this.pingInterval = window.setInterval(() => {
@@ -304,8 +305,6 @@ export function normalizeVideoUrl(inputUrl: string): string {
   if (!inputUrl) return '';
   const trimmed = inputUrl.trim();
 
-  // Convert GitHub blob links e.g.
-  // https://github.com/user/repo/blob/main/folder/movie.mp4 -> https://raw.githubusercontent.com/user/repo/main/folder/movie.mp4
   const githubBlobRegex = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/i;
   const match = trimmed.match(githubBlobRegex);
   if (match) {
@@ -313,7 +312,6 @@ export function normalizeVideoUrl(inputUrl: string): string {
     return `https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}`;
   }
 
-  // Convert github.com/user/repo/raw/... to raw.githubusercontent.com/...
   const githubRawRegex = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/raw\/([^/]+)\/(.+)$/i;
   const rawMatch = trimmed.match(githubRawRegex);
   if (rawMatch) {

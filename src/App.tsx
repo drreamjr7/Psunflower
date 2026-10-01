@@ -16,7 +16,37 @@ import {
   joinRoomParticipant,
   FirebaseRoom,
 } from './services/firebase';
-import { Github, ShieldCheck, AlertTriangle, ArrowRight, Home, Plus } from 'lucide-react';
+import { Github, ShieldCheck, AlertTriangle, ArrowRight, Home, Plus, Loader2 } from 'lucide-react';
+
+/**
+ * Robust URL room extractor handling:
+ * - ?room=XYZ
+ * - ?/&room=XYZ (GitHub Pages SPA 404 redirection)
+ * - #room=XYZ
+ * - Trailing slashes or URL encoded values
+ */
+function extractRoomIdFromUrl(): string | null {
+  try {
+    const searchParams = new URLSearchParams(window.location.search);
+    const searchRoom = searchParams.get('room');
+    if (searchRoom) {
+      return searchRoom.trim().replace(/[^a-zA-Z0-9-_]/g, '').toUpperCase();
+    }
+
+    const hrefMatch = window.location.href.match(/[?&#]room=([a-zA-Z0-9-_]+)/i);
+    if (hrefMatch && hrefMatch[1]) {
+      return hrefMatch[1].trim().toUpperCase();
+    }
+
+    const hashMatch = window.location.hash.match(/room=([a-zA-Z0-9-_]+)/i);
+    if (hashMatch && hashMatch[1]) {
+      return hashMatch[1].trim().toUpperCase();
+    }
+  } catch (e) {
+    console.error('[Sunflower Room Sync] URL parsing error:', e);
+  }
+  return null;
+}
 
 export default function App() {
   // Navigation / Room State
@@ -25,6 +55,10 @@ export default function App() {
   const [currentParticipant, setCurrentParticipant] = useState<Participant | null>(null);
   const [currentVideoUrl, setCurrentVideoUrl] = useState<string>(VIDEO_PRESETS[0].url);
   const [currentVideoTitle, setCurrentVideoTitle] = useState<string>(VIDEO_PRESETS[0].title);
+
+  // Connecting / Verifying indicator
+  const [isConnectingRoom, setIsConnectingRoom] = useState(false);
+  const [connectingRoomCode, setConnectingRoomCode] = useState<string | null>(null);
 
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -57,45 +91,42 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKey);
   }, [isOwner]);
 
-  // Read ?room=ROOM_ID from URL on page load or URL change
+  // Read and verify room from URL on page load or URL change
   useEffect(() => {
     const handleUrlRoom = async () => {
-      const params = new URLSearchParams(window.location.search);
-      const urlRoom = params.get('room') || window.location.hash.match(/room=([^&]+)/)?.[1];
+      const urlRoomId = extractRoomIdFromUrl();
+      console.log('[Sunflower Room Sync] URL room ID:', urlRoomId);
 
-      if (urlRoom) {
-        const code = urlRoom.trim().toUpperCase();
-        if (currentRoomId === code) return;
+      if (urlRoomId) {
+        // If already connected to this exact room, skip
+        if (currentRoomId === urlRoomId && currentParticipant) {
+          console.log('[Sunflower Room Sync] Already active in room:', urlRoomId);
+          return;
+        }
+
+        setIsConnectingRoom(true);
+        setConnectingRoomCode(urlRoomId);
 
         try {
-          const room = await getRoomFromFirebase(code);
-          if (room) {
-            // Check if user already has a saved session for this room
-            const savedSession = sessionStorage.getItem(`sunflower_user_${code}`);
-            if (savedSession) {
-              try {
-                const parsed = JSON.parse(savedSession) as Participant;
-                setCurrentParticipant(parsed);
-                setCurrentRoomId(room.roomId);
-                setCurrentRoomName(room.roomName);
-                setCurrentVideoUrl(room.videoUrl);
-                setCurrentVideoTitle(room.videoTitle);
-                return;
-              } catch {
-                // Ignore parse errors and prompt join
-              }
-            }
+          const room = await getRoomFromFirebase(urlRoomId);
 
-            setJoinModalInitialCode(code);
+          if (room) {
+            console.log('[Sunflower Room Sync] Found existing watch room in Firestore:', room);
+            setJoinModalInitialCode(urlRoomId);
             setIsJoinInvite(true);
             setIsJoinOpen(true);
+            setRoomNotFoundCode(null);
           } else {
-            // Room does not exist in Firebase. NEVER silently create another room!
-            setRoomNotFoundCode(code);
+            console.log('[Sunflower Room Sync] Room lookup failed: room does not exist in Firestore:', urlRoomId);
+            setRoomNotFoundCode(urlRoomId);
+            setIsJoinOpen(false);
           }
         } catch (err) {
-          console.error('Error verifying room in Firebase:', err);
-          setRoomNotFoundCode(code);
+          console.error('[Sunflower Room Sync] Error during room verification:', err);
+          setRoomNotFoundCode(urlRoomId);
+          setIsJoinOpen(false);
+        } finally {
+          setIsConnectingRoom(false);
         }
       }
     };
@@ -121,15 +152,17 @@ export default function App() {
     videoUrl: string;
     videoTitle: string;
   }) => {
-    const cleanCode = (roomCode || generateRoomCode()).trim().toUpperCase();
+    const cleanCode = (roomCode || generateRoomCode()).trim().replace(/[^a-zA-Z0-9-_]/g, '').toUpperCase();
     const cleanRoomName = roomName.trim() || 'Sunflower Watch Party';
+
+    console.log('[Sunflower Room Sync] Initiating Room Creation:', { cleanCode, cleanRoomName });
 
     const participant: Participant = {
       id: `host-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      name: hostName.trim() || 'Alex',
+      name: hostName.trim() || 'Host',
       color: '#f59e0b',
       isHost: true,
-      avatarSeed: hostName.trim() || 'Alex',
+      avatarSeed: hostName.trim() || 'Host',
       joinedAt: Date.now(),
       lastPing: Date.now(),
     };
@@ -149,7 +182,7 @@ export default function App() {
       createdAt: Date.now(),
     });
 
-    // 2. Register Host presence
+    // 2. Register Host presence in Firestore
     await joinRoomParticipant(cleanCode, {
       id: participant.id,
       name: participant.name,
@@ -160,8 +193,13 @@ export default function App() {
       avatarSeed: participant.avatarSeed,
     });
 
-    // 3. Save session for seamless refresh
-    sessionStorage.setItem(`sunflower_user_${cleanCode}`, JSON.stringify(participant));
+    // 3. Generate Invite URL with trailing slash safety
+    const cleanPath = window.location.pathname.endsWith('/')
+      ? window.location.pathname
+      : `${window.location.pathname}/`;
+    const inviteUrl = `${window.location.origin}${cleanPath}?room=${cleanCode}`;
+    console.log('[Sunflower Room Sync] Invite URL generated:', inviteUrl);
+
     trackVisitorJoin(participant.id, hostName, 'owner', cleanCode, cleanRoomName, participant.color);
 
     setCurrentParticipant(participant);
@@ -171,18 +209,19 @@ export default function App() {
     setCurrentVideoTitle(videoTitle);
     setIsCreateOpen(false);
 
-    // 4. Update address bar to ?room=ROOM_ID
-    const newUrl = `${window.location.pathname}?room=${cleanCode}`;
-    window.history.pushState({ room: cleanCode }, '', newUrl);
+    // Update browser address bar
+    window.history.pushState({ room: cleanCode }, '', `${cleanPath}?room=${cleanCode}`);
   };
 
   // Handle Join Room
   const handleJoinRoom = async (roomCode: string, userName: string) => {
-    const cleanCode = roomCode.trim().toUpperCase();
+    const cleanCode = roomCode.trim().replace(/[^a-zA-Z0-9-_]/g, '').toUpperCase();
+    console.log('[Sunflower Room Sync] Attempting to join room:', cleanCode);
 
     // Look up exact room in Firebase
     const room = await getRoomFromFirebase(cleanCode);
     if (!room) {
+      console.warn('[Sunflower Room Sync] Join failed - room not found in Firestore:', cleanCode);
       setIsJoinOpen(false);
       setRoomNotFoundCode(cleanCode);
       return;
@@ -198,7 +237,7 @@ export default function App() {
       lastPing: Date.now(),
     };
 
-    // Register Guest presence in Firebase
+    // Register Guest presence in Firestore
     await joinRoomParticipant(cleanCode, {
       id: participant.id,
       name: participant.name,
@@ -209,8 +248,14 @@ export default function App() {
       avatarSeed: participant.avatarSeed,
     });
 
-    // Save session for seamless refresh
-    sessionStorage.setItem(`sunflower_user_${cleanCode}`, JSON.stringify(participant));
+    console.log('[Sunflower Room Sync] join result:', {
+      success: true,
+      roomId: cleanCode,
+      participantId: participant.id,
+      participantName: participant.name,
+      roomName: room.roomName,
+    });
+
     trackVisitorJoin(participant.id, userName, 'guest', cleanCode, room.roomName, participant.color);
 
     setCurrentParticipant(participant);
@@ -221,9 +266,11 @@ export default function App() {
     setIsJoinOpen(false);
     setIsJoinInvite(false);
 
-    // Update address bar to ?room=ROOM_ID
-    const newUrl = `${window.location.pathname}?room=${cleanCode}`;
-    window.history.pushState({ room: cleanCode }, '', newUrl);
+    // Update address bar with clean path
+    const cleanPath = window.location.pathname.endsWith('/')
+      ? window.location.pathname
+      : `${window.location.pathname}/`;
+    window.history.pushState({ room: cleanCode }, '', `${cleanPath}?room=${cleanCode}`);
   };
 
   // Quick launch preset directly from Hero
@@ -239,12 +286,12 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
-    if (currentRoomId) {
-      sessionStorage.removeItem(`sunflower_user_${currentRoomId}`);
-    }
     setCurrentRoomId(null);
     setCurrentParticipant(null);
-    window.history.pushState({}, '', window.location.pathname);
+    const cleanPath = window.location.pathname.endsWith('/')
+      ? window.location.pathname
+      : `${window.location.pathname}/`;
+    window.history.pushState({}, '', cleanPath);
   };
 
   const scrollToSection = (sectionId: string) => {
@@ -361,7 +408,19 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 flex flex-col">
-        {currentRoomId && currentParticipant ? (
+        {isConnectingRoom ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <Loader2 className="w-7 h-7 animate-spin" />
+            </div>
+            <div className="text-center space-y-1">
+              <h2 className="text-lg font-bold font-display text-white">Connecting to Watch Party...</h2>
+              <p className="text-xs font-mono text-amber-400/90 tracking-wide">
+                Verifying Room {connectingRoomCode}
+              </p>
+            </div>
+          </div>
+        ) : currentRoomId && currentParticipant ? (
           <WatchRoom
             roomId={currentRoomId}
             roomName={currentRoomName}
@@ -388,7 +447,7 @@ export default function App() {
       </main>
 
       {/* Footer - only shown on landing page */}
-      {!currentRoomId && (
+      {!currentRoomId && !isConnectingRoom && (
         <footer className="border-t border-amber-500/15 py-8 px-4 md:px-8 bg-[#05070a] text-xs text-slate-400">
           <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-2 font-display font-bold text-white">
@@ -481,7 +540,10 @@ export default function App() {
                 <button
                   onClick={() => {
                     setRoomNotFoundCode(null);
-                    window.history.pushState({}, '', window.location.pathname);
+                    const cleanPath = window.location.pathname.endsWith('/')
+                      ? window.location.pathname
+                      : `${window.location.pathname}/`;
+                    window.history.pushState({}, '', cleanPath);
                   }}
                   className="flex-1 py-2.5 px-4 bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                 >
@@ -491,7 +553,10 @@ export default function App() {
                 <button
                   onClick={() => {
                     setRoomNotFoundCode(null);
-                    window.history.pushState({}, '', window.location.pathname);
+                    const cleanPath = window.location.pathname.endsWith('/')
+                      ? window.location.pathname
+                      : `${window.location.pathname}/`;
+                    window.history.pushState({}, '', cleanPath);
                     setIsCreateOpen(true);
                   }}
                   className="flex-1 py-2.5 px-4 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20 flex items-center justify-center gap-1.5 cursor-pointer"

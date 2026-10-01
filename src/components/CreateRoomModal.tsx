@@ -71,7 +71,10 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
     });
   };
 
-  const inviteLink = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
+  const cleanPath = window.location.pathname.endsWith('/')
+    ? window.location.pathname
+    : `${window.location.pathname}/`;
+  const inviteLink = `${window.location.origin}${cleanPath}?room=${roomCode}`;
 
   const handleCopyLink = async () => {
     try {

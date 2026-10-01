@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import { Participant, ChatMessage, ReactionBurst, SyncPayload } from '../types/party';
 import { CineSyncEngine, normalizeVideoUrl } from '../services/syncEngine';
-import { getRoomFromFirebase, subscribeToParticipants, subscribeToMessages } from '../services/firebase';
+import { getRoomFromFirebase, subscribeToRoom, subscribeToParticipants, subscribeToMessages } from '../services/firebase';
 import { playSound } from '../services/soundEffects';
 import { FloatingReactions } from './FloatingReactions';
 import { VIDEO_PRESETS } from '../data/videoPresets';
@@ -62,6 +62,7 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const syncEngineRef = useRef<CineSyncEngine | null>(null);
+  const pendingSeekTimeRef = useRef<number | null>(null);
 
   // Video State
   const [videoUrl, setVideoUrl] = useState(initialVideoUrl);
@@ -74,6 +75,7 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [needsUserGesture, setNeedsUserGesture] = useState(false);
 
   // CineSync features
   const [ambilightEnabled, setAmbilightEnabled] = useState(true);
@@ -143,24 +145,60 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
   useEffect(() => {
     let active = true;
 
-    // Fetch room state from Firebase
+    // Fetch initial room state from Firebase
     getRoomFromFirebase(roomId).then((room) => {
       if (!active || !room) return;
+      console.log('[Sunflower Room Sync] Initial room hydration on device:', room);
       if (room.videoUrl && room.videoUrl !== videoUrl) {
         setVideoUrl(room.videoUrl);
         if (room.videoTitle) setVideoTitle(room.videoTitle);
       }
-      if (videoRef.current && room.playbackTime !== undefined) {
-        if (Math.abs(videoRef.current.currentTime - room.playbackTime) > 1.2) {
+      if (room.playbackTime !== undefined) {
+        pendingSeekTimeRef.current = room.playbackTime;
+        if (videoRef.current && videoRef.current.readyState >= 1) {
           videoRef.current.currentTime = room.playbackTime;
           setCurrentTime(room.playbackTime);
+          pendingSeekTimeRef.current = null;
         }
+      }
+      if (room.isPlaying) {
+        setIsPlaying(true);
+        if (videoRef.current) {
+          videoRef.current.play().then(() => setNeedsUserGesture(false)).catch(() => setNeedsUserGesture(true));
+        }
+      }
+    });
+
+    // Realtime room document subscription (cross-device sync)
+    const unsubRoom = subscribeToRoom(roomId, (room) => {
+      if (!active || !room) return;
+      if (room.lastUpdatedBy === currentParticipant.id) return; // avoid self-loop
+
+      console.log('[Sunflower Room Sync] Active room Firestore update received:', {
+        isPlaying: room.isPlaying,
+        playbackTime: room.playbackTime,
+        videoUrl: room.videoUrl,
+      });
+
+      if (room.videoUrl && room.videoUrl !== videoUrl) {
+        setVideoUrl(room.videoUrl);
+        if (room.videoTitle) setVideoTitle(room.videoTitle);
+      }
+
+      if (videoRef.current) {
+        if (room.playbackTime !== undefined && Math.abs(videoRef.current.currentTime - room.playbackTime) > 1.2) {
+          isRemoteActionRef.current = true;
+          videoRef.current.currentTime = room.playbackTime;
+          setCurrentTime(room.playbackTime);
+          setTimeout(() => { isRemoteActionRef.current = false; }, 300);
+        }
+
         if (room.isPlaying) {
-          videoRef.current.play().catch(() => {});
           setIsPlaying(true);
+          videoRef.current.play().then(() => setNeedsUserGesture(false)).catch(() => setNeedsUserGesture(true));
         } else {
-          videoRef.current.pause();
           setIsPlaying(false);
+          videoRef.current.pause();
         }
       }
     });
@@ -168,6 +206,7 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
     // Realtime roster from Firebase
     const unsubParticipants = subscribeToParticipants(roomId, (list) => {
       if (!active) return;
+      console.log('[Sunflower Room Sync] Participants roster updated from Firestore, count:', list.length);
       if (list && list.length > 0) {
         setParticipants(
           list.map((p) => ({
@@ -203,10 +242,11 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
 
     return () => {
       active = false;
+      unsubRoom();
       unsubParticipants();
       unsubMessages();
     };
-  }, [roomId]);
+  }, [roomId, currentParticipant.id]);
 
   // Handle incoming payloads
   const handleIncomingSync = useCallback((payload: SyncPayload) => {
@@ -564,7 +604,10 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
   };
 
   const copyRoomLink = async () => {
-    const link = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    const cleanPath = window.location.pathname.endsWith('/')
+      ? window.location.pathname
+      : `${window.location.pathname}/`;
+    const link = `${window.location.origin}${cleanPath}?room=${roomId}`;
     try {
       if (navigator.clipboard) {
         await navigator.clipboard.writeText(link);
@@ -701,12 +744,40 @@ export const WatchRoom: React.FC<WatchRoomProps> = ({
                 if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
               }}
               onLoadedMetadata={() => {
-                if (videoRef.current) setDuration(videoRef.current.duration);
+                if (videoRef.current) {
+                  setDuration(videoRef.current.duration);
+                  if (pendingSeekTimeRef.current !== null) {
+                    console.log('[Sunflower Room Sync] Applying pending seek time on metadata loaded:', pendingSeekTimeRef.current);
+                    videoRef.current.currentTime = pendingSeekTimeRef.current;
+                    setCurrentTime(pendingSeekTimeRef.current);
+                    pendingSeekTimeRef.current = null;
+                  }
+                }
               }}
               onWaiting={() => setIsBuffering(true)}
               onPlaying={() => setIsBuffering(false)}
               className="w-full h-full object-contain max-h-[100vh] cursor-pointer"
             />
+
+            {/* Mobile / Autoplay Gesture Override Prompt */}
+            {needsUserGesture && (
+              <div className="absolute top-6 left-1/2 -translate-x-1/2 z-30 pointer-events-auto">
+                <button
+                  onClick={() => {
+                    if (videoRef.current) {
+                      videoRef.current
+                        .play()
+                        .then(() => setNeedsUserGesture(false))
+                        .catch(() => {});
+                    }
+                  }}
+                  className="bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-bold px-5 py-2.5 rounded-full shadow-2xl shadow-amber-500/50 flex items-center gap-2 text-xs animate-bounce cursor-pointer tracking-wide uppercase"
+                >
+                  <Play className="w-4 h-4 fill-current" />
+                  <span>Tap to Sync Playback 🍿</span>
+                </button>
+              </div>
+            )}
 
             {/* Floating Reactions Overlay */}
             <FloatingReactions reactions={reactions} />
